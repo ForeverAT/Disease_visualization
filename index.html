@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Disease Spread Visualizer</title>
+  <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/deck.gl@9/dist.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: system-ui, -apple-system, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #header {
+      padding: 10px 18px;
+      background: rgba(22, 27, 34, 0.96);
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+      z-index: 100;
+    }
+    #header h1 { font-size: 0.95rem; font-weight: 600; }
+    #status { margin-left: auto; font-size: 0.74rem; color: #8b949e; }
+    #status.ok  { color: #3fb950; }
+    #status.err { color: #f85149; }
+
+    #app-area { flex: 1; position: relative; overflow: hidden; }
+    #map { position: absolute; inset: 0; }
+    #deck-canvas { position: absolute; inset: 0; pointer-events: none; }
+
+    #controls {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(13, 17, 23, 0.88);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 13px 20px;
+      display: none;
+      align-items: center;
+      gap: 14px;
+      min-width: 480px;
+      z-index: 20;
+      box-shadow: 0 4px 28px rgba(0,0,0,0.55);
+    }
+    #btn-group { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+    .step-btn {
+      width: 30px; height: 30px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #21262d; color: #e6edf3;
+      font-size: 0.82rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s;
+    }
+    .step-btn:hover:not(:disabled) { background: #30363d; }
+    .step-btn:disabled { opacity: 0.3; cursor: default; }
+    #play-btn {
+      width: 36px; height: 36px;
+      border-radius: 50%; border: none;
+      background: #1e7cd6; color: #fff;
+      font-size: 0.95rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.12s;
+    }
+    #play-btn:hover { background: #155fa0; }
+    #date-slider { flex: 1; accent-color: #1e7cd6; cursor: pointer; }
+    #date-label {
+      font-size: 0.8rem; font-weight: 600; color: #e6edf3;
+      min-width: 96px; text-align: right; font-variant-numeric: tabular-nums;
+    }
+
+    #legend {
+      position: absolute; top: 16px; right: 16px;
+      background: rgba(13, 17, 23, 0.85);
+      border: 1px solid #30363d; border-radius: 8px;
+      padding: 10px 14px; z-index: 20; display: none; min-width: 130px;
+    }
+    #legend-title {
+      font-size: 0.67rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.07em; color: #8b949e; margin-bottom: 7px;
+    }
+    #legend-bar {
+      height: 10px; border-radius: 4px; margin-bottom: 5px;
+      background: linear-gradient(to right, #0032c8, #009fff, #ffe600, #ff5000, #b40000);
+    }
+    #legend-labels { display: flex; justify-content: space-between; font-size: 0.67rem; color: #8b949e; }
+
+    #empty {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center; color: #8b949e; font-size: 0.88rem;
+      line-height: 2.2; z-index: 20; pointer-events: none;
+    }
+    #empty code {
+      background: #161b22; padding: 2px 8px; border-radius: 4px;
+      font-family: monospace; font-size: 0.82rem; color: #e6edf3;
+    }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Disease Spread Visualizer</h1>
+  <span id="status">Connecting…</span>
+</div>
+
+<div id="app-area">
+  <div id="map"></div>
+  <canvas id="deck-canvas"></canvas>
+
+  <div id="controls">
+    <div id="btn-group">
+      <button class="step-btn" id="prev-btn" title="Previous date">&#8592;</button>
+      <button id="play-btn">&#9654;</button>
+      <button class="step-btn" id="next-btn" title="Next date">&#8594;</button>
+    </div>
+    <input type="range" id="date-slider" min="0" max="0" value="0" step="1" />
+    <span id="date-label">—</span>
+  </div>
+
+  <div id="legend">
+    <div id="legend-title">Spread Intensity</div>
+    <div id="legend-bar"></div>
+    <div id="legend-labels"><span>Low</span><span>High</span></div>
+  </div>
+
+  <div id="empty">
+    No data yet.<br>
+    Run <code>python watcher.py</code> to generate output.
+  </div>
+</div>
+
+<script>
+  const { Deck, BitmapLayer } = deck;
+
+  const POLL_MS     = 3000;
+  const GEOJSON_URL = 'output/spread.geojson';
+  const MAP_STYLE   = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+  const DEFAULT_LNG = 114.17;
+  const DEFAULT_LAT = 22.32;
+  const DEFAULT_ZOOM = 11;
+
+  // ── Color scale: blue → cyan → yellow → orange → red ─────────────────────
+  const COLOR_STOPS = [
+    [0.00, [  0,  50, 200]],
+    [0.30, [  0, 159, 255]],
+    [0.55, [255, 230,   0]],
+    [0.75, [255,  80,   0]],
+    [1.00, [176,   0,   0]],
+  ];
+
+  function intensityToRGBA(t) {
+    if (t < 0.01) return [0, 0, 0, 0];
+
+    let lo = COLOR_STOPS[0], hi = COLOR_STOPS[COLOR_STOPS.length - 1];
+    for (let i = 0; i < COLOR_STOPS.length - 1; i++) {
+      if (t >= COLOR_STOPS[i][0] && t <= COLOR_STOPS[i + 1][0]) {
+        lo = COLOR_STOPS[i]; hi = COLOR_STOPS[i + 1]; break;
+      }
+    }
+    const f = (hi[0] === lo[0]) ? 1 : (t - lo[0]) / (hi[0] - lo[0]);
+    const r = Math.round(lo[1][0] + f * (hi[1][0] - lo[1][0]));
+    const g = Math.round(lo[1][1] + f * (hi[1][1] - lo[1][1]));
+    const b = Math.round(lo[1][2] + f * (hi[1][2] - lo[1][2]));
+    // Alpha: gentle ramp so near-zero cells are transparent
+    const a = Math.round(Math.pow(Math.min(t / 0.5, 1), 0.6) * 230);
+    return [r, g, b, a];
+  }
+
+  // ── Render intensity grid → HTMLCanvasElement ─────────────────────────────
+  // Returns null if no data.
+  function buildHeatmapCanvas(subset, lngs, lats) {
+    const W = lngs.length;
+    const H = lats.length;
+    if (!W || !H) return null;
+
+    // lng → col index, lat → row index (both sorted ascending)
+    const lngIdx = new Map(lngs.map((v, i) => [v.toFixed(7), i]));
+    const latIdx = new Map(lats.map((v, i) => [v.toFixed(7), i]));
+
+    const grid = new Float32Array(W * H);  // [latRow * W + lngCol]
+    for (const d of subset) {
+      const ci = lngIdx.get(d.lng.toFixed(7));
+      const ri = latIdx.get(d.lat.toFixed(7));
+      if (ci !== undefined && ri !== undefined) grid[ri * W + ci] = d.intensity;
+    }
+
+    // Draw raw pixels onto a W×H canvas.
+    // Canvas Y=0 is the TOP of the image → must map to the HIGHEST lat row.
+    const raw = document.createElement('canvas');
+    raw.width = W; raw.height = H;
+    const rawCtx = raw.getContext('2d');
+    const imgData = rawCtx.createImageData(W, H);
+
+    for (let row = 0; row < H; row++) {
+      const latRow = H - 1 - row;   // flip: canvas top = high lat
+      for (let col = 0; col < W; col++) {
+        const t = grid[latRow * W + col];
+        const [r, g, b, a] = intensityToRGBA(t);
+        const idx = (row * W + col) * 4;
+        imgData.data[idx]     = r;
+        imgData.data[idx + 1] = g;
+        imgData.data[idx + 2] = b;
+        imgData.data[idx + 3] = a;
+      }
+    }
+    rawCtx.putImageData(imgData, 0, 0);
+
+    // Upscale 4× with bilinear interpolation for smooth rendering at all zooms
+    const SCALE = 4;
+    const out = document.createElement('canvas');
+    out.width = W * SCALE; out.height = H * SCALE;
+    const outCtx = out.getContext('2d');
+    outCtx.imageSmoothingEnabled = true;
+    outCtx.imageSmoothingQuality = 'high';
+    outCtx.drawImage(raw, 0, 0, out.width, out.height);
+
+    return out;
+  }
+
+  // ── DOM ───────────────────────────────────────────────────────────────────
+  const statusEl  = document.getElementById('status');
+  const controls  = document.getElementById('controls');
+  const legendEl  = document.getElementById('legend');
+  const emptyEl   = document.getElementById('empty');
+  const prevBtn   = document.getElementById('prev-btn');
+  const playBtn   = document.getElementById('play-btn');
+  const nextBtn   = document.getElementById('next-btn');
+  const slider    = document.getElementById('date-slider');
+  const dateLabel = document.getElementById('date-label');
+
+  // ── MapLibre ──────────────────────────────────────────────────────────────
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: MAP_STYLE,
+    center: [DEFAULT_LNG, DEFAULT_LAT],
+    zoom: DEFAULT_ZOOM,
+    antialias: true,
+  });
+
+  // ── Deck.gl ───────────────────────────────────────────────────────────────
+  const canvas = document.getElementById('deck-canvas');
+  const appArea = document.getElementById('app-area');
+
+  function syncCanvasSize() {
+    canvas.width  = appArea.offsetWidth;
+    canvas.height = appArea.offsetHeight;
+  }
+  syncCanvasSize();
+
+  const deckgl = new Deck({
+    canvas: 'deck-canvas',
+    controller: false,
+    width: canvas.width,
+    height: canvas.height,
+    viewState: { longitude: DEFAULT_LNG, latitude: DEFAULT_LAT, zoom: DEFAULT_ZOOM, pitch: 0, bearing: 0 },
+    layers: [],
+  });
+
+  function syncCamera() {
+    const c = map.getCenter();
+    deckgl.setProps({
+      viewState: {
+        longitude: c.lng, latitude: c.lat,
+        zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(),
+      },
+    });
+  }
+  map.on('move', syncCamera);
+
+  window.addEventListener('resize', () => {
+    syncCanvasSize();
+    deckgl.setProps({ width: canvas.width, height: canvas.height });
+    map.resize();
+    syncCamera();
+  });
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let allData        = [];
+  let dates          = [];
+  let gridLngs       = [];
+  let gridLats       = [];
+  let gridBounds     = null;  // [minLng, minLat, maxLng, maxLat]
+  let canvasCache    = {};    // dateStr → HTMLCanvasElement
+  let currentIdx     = 0;
+  let playing        = false;
+  let playTimer      = null;
+  let lastModified   = null;
+  let centeredOnData = false;
+
+  // ── Layer ─────────────────────────────────────────────────────────────────
+  function makeLayer(dateStr) {
+    const cvs = canvasCache[dateStr];
+    if (!cvs || !gridBounds) return null;
+    return new BitmapLayer({
+      id:      'spread-bitmap',
+      bounds:  gridBounds,
+      image:   cvs,
+      opacity: 0.82,
+      pickable: false,
+    });
+  }
+
+  function showDate(idx) {
+    currentIdx = idx;
+    slider.value = idx;
+    dateLabel.textContent = dates[idx] ?? '—';
+    prevBtn.disabled = idx <= 0;
+    nextBtn.disabled = idx >= dates.length - 1;
+    const layer = makeLayer(dates[idx]);
+    deckgl.setProps({ layers: layer ? [layer] : [] });
+  }
+
+  // ── Play / pause / step ───────────────────────────────────────────────────
+  slider.addEventListener('input', () => { stopPlay(); showDate(parseInt(slider.value, 10)); });
+  playBtn.addEventListener('click', () => playing ? stopPlay() : startPlay());
+  prevBtn.addEventListener('click', () => { stopPlay(); if (currentIdx > 0) showDate(currentIdx - 1); });
+  nextBtn.addEventListener('click', () => { stopPlay(); if (currentIdx < dates.length - 1) showDate(currentIdx + 1); });
+
+  function startPlay() {
+    playing = true;
+    playBtn.innerHTML = '&#9646;&#9646;';
+    if (currentIdx >= dates.length - 1) currentIdx = -1;
+    playTimer = setInterval(() => {
+      if (currentIdx < dates.length - 1) showDate(currentIdx + 1);
+      else stopPlay();
+    }, 600);
+  }
+
+  function stopPlay() {
+    playing = false;
+    playBtn.innerHTML = '&#9654;';
+    clearInterval(playTimer);
+  }
+
+  // ── Fit map to data ───────────────────────────────────────────────────────
+  function fitToData(features) {
+    const lngs = features.map(f => f.geometry.coordinates[0]);
+    const lats = features.map(f => f.geometry.coordinates[1]);
+    map.fitBounds(
+      [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+      { padding: 80, maxZoom: 13, duration: 900 }
+    );
+  }
+
+  // ── Apply loaded data ─────────────────────────────────────────────────────
+  function applyData(geojson) {
+    const features = geojson.features;
+
+    if (!features.length) {
+      emptyEl.style.display   = 'block';
+      controls.style.display  = 'none';
+      legendEl.style.display  = 'none';
+      deckgl.setProps({ layers: [] });
+      return;
+    }
+
+    emptyEl.style.display   = 'none';
+    controls.style.display  = 'flex';
+    legendEl.style.display  = 'block';
+
+    const prevDate = dates[currentIdx] ?? null;
+
+    allData = features.map(f => ({
+      lng:       f.geometry.coordinates[0],
+      lat:       f.geometry.coordinates[1],
+      date:      f.properties.date,
+      intensity: f.properties.intensity,
+    }));
+
+    // Derive grid coordinates and bounds from ALL features (same grid every date)
+    gridLngs = [...new Set(allData.map(d => d.lng))].sort((a, b) => a - b);
+    gridLats = [...new Set(allData.map(d => d.lat))].sort((a, b) => a - b);
+    gridBounds = [
+      gridLngs[0], gridLats[0],
+      gridLngs[gridLngs.length - 1], gridLats[gridLats.length - 1],
+    ];
+
+    dates = [...new Set(allData.map(d => d.date))].sort();
+    slider.max = dates.length - 1;
+
+    // Pre-build all canvases so scrubbing is instant
+    canvasCache = {};
+    for (const d of dates) {
+      const subset = allData.filter(p => p.date === d);
+      canvasCache[d] = buildHeatmapCanvas(subset, gridLngs, gridLats);
+    }
+
+    if (!centeredOnData) {
+      fitToData(features);
+      centeredOnData = true;
+      showDate(dates.length - 1);
+    } else {
+      const newIdx = prevDate ? dates.indexOf(prevDate) : -1;
+      showDate(newIdx >= 0 ? newIdx : dates.length - 1);
+    }
+  }
+
+  // ── Polling ───────────────────────────────────────────────────────────────
+  async function poll() {
+    try {
+      const res = await fetch(GEOJSON_URL, { cache: 'no-cache' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const modified = res.headers.get('last-modified') || res.headers.get('etag') || '';
+      if (modified && modified === lastModified) return;
+      lastModified = modified;
+      applyData(await res.json());
+      statusEl.className   = 'ok';
+      statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    } catch {
+      statusEl.className   = 'err';
+      statusEl.textContent = 'Run watcher.py to generate data';
+      emptyEl.style.display = 'block';
+    }
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
